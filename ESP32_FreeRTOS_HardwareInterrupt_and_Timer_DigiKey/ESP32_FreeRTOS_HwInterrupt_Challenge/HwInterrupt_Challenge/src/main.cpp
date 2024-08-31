@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <freertos/ringbuf.h>
 
 #if CONFIG_FREERTOS_UNICORE
   static const BaseType_t app_cpu = 0;
@@ -19,7 +20,7 @@ static const uint64_t timer_max_count = 1000000;
 volatile uint8_t recordCount = 0;
 //<---- ------------------------------------------------------------------ ---->
 static TaskHandle_t recordTask_Handle = NULL;
-
+static RingbufHandle_t buffer_Handle = NULL;
 static hw_timer_t *hal_timer = NULL;
 //<---- ------------------------------------------------------------------ ---->
 void recordSerial_Task(void* parameters);
@@ -37,6 +38,8 @@ void setup()
 
   vTaskDelay(1000 / portTICK_PERIOD_MS);
 
+  buffer_Handle = xRingbufferCreate(10, RINGBUF_TYPE_BYTEBUF);
+  
   xTaskCreatePinnedToCore(recordSerial_Task, "RECORD_TASK", 1024, NULL, 1, &recordTask_Handle, app_cpu);
 
   vTaskDelete(NULL);
@@ -49,6 +52,8 @@ void recordSerial_Task(void* parameters)
 {
   uint32_t ulNotifyValue;
 
+  int* recMsg;
+
   while (1)
   {
     ulNotifyValue = ulTaskNotifyTake(pdTRUE, 0);
@@ -56,6 +61,10 @@ void recordSerial_Task(void* parameters)
     {
       digitalWrite(led_pin, HIGH);
       Serial.println("Hello from Timer_ISR function");
+
+      size_t receivedMessageSize;
+      recMsg = (int*)xRingbufferReceiveUpTo(buffer_Handle, &receivedMessageSize, 0, 10);
+      Serial.println(*recMsg);
     }
 
     if(Serial.available())
@@ -70,6 +79,8 @@ void recordSerial_Task(void* parameters)
       else if(recNum_c[counterOfRecNumber] == '\n')
       {
         realNumber = atoi(&recNum_c[1]);
+        
+        xRingbufferSend(buffer_Handle, &realNumber, sizeof(realNumber), 0);
 
         hal_timer = timerBegin(0, timer_divider, true);               // Create and Start timer (timer_number, divider, countUp)
         timerAttachInterrupt(hal_timer, &timer_isr_handler, true);    // Provide ISR to timer (timer, void (*function)(), edge)
@@ -86,7 +97,9 @@ void recordSerial_Task(void* parameters)
 void IRAM_ATTR timer_isr_handler()
 {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
   vTaskNotifyGiveFromISR(recordTask_Handle, &xHigherPriorityTaskWoken);
+
   if(xHigherPriorityTaskWoken==pdTRUE)
   {
     portYIELD_FROM_ISR();
